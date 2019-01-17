@@ -240,6 +240,17 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
 def get_masked_lm_output(bert_config, input_tensor, output_weights, positions,
                          label_ids, label_weights):
   """Get loss and log probs for the masked LM."""
+
+  #The tokens that will be predicted are labeled as [MASK], the parameter 'positions'
+  #give the index(position) of these [MASK] tokens within sentence. By feeding forward
+  #through early layer of transformer model, each token within one sentence has been represented
+  #as vector, include those [MASK] token. Hence, we can fetch out these [MASK] token vector, which
+  #has already encode the information(attribute) that come from other tokens in this sentence through
+  #the feed-forward process of early layer, using these vector to do the softmax and predict the corresponding
+  #token. Further, how likely one [MASK] token will be predicted as token_i are calculated by doing dot product
+  #between [MASK] vector and embedding vector of token_i within word-embedding table, then do the softmax. This
+  #procedure are very similiar to the process that train word vector through cbow or skip-gram
+
   input_tensor = gather_indexes(input_tensor, positions)
 
   with tf.variable_scope("cls/predictions"):
