@@ -722,10 +722,15 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
           scaffold_fn=scaffold_fn)
     elif mode == tf.estimator.ModeKeys.EVAL:
 
-      def metric_fn(per_example_loss, label_ids, logits, is_real_example):
-        predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
-        accuracy = tf.metrics.accuracy(
-            labels=label_ids, predictions=predictions, weights=is_real_example)
+      def metric_fn(per_example_loss, label_ids, probabilities, is_real_example):
+        #predictions = tf.argmax(probabilities, axis=-1, output_type=tf.int32)
+        predictions = tf.round(probabilities)
+        difference = label_ids - predictions
+        num_none_zero = tf.count_nonzero(difference, axis=-1)
+        ground_truth = tf.zeros(tf.shape(num_none_zero))
+        accuracy = tf.metrics.accuracy(labels=ground_truth, predictions=predictions, weights=is_real_example)
+        # accuracy = tf.metrics.accuracy(
+        #     labels=label_ids, predictions=predictions, weights=is_real_example)
         loss = tf.metrics.mean(values=per_example_loss, weights=is_real_example)
         return {
             "eval_accuracy": accuracy,
@@ -733,7 +738,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
         }
 
       eval_metrics = (metric_fn,
-                      [per_example_loss, label_ids, logits, is_real_example])
+                      [per_example_loss, label_ids, probabilities, is_real_example])
       output_spec = tf.contrib.tpu.TPUEstimatorSpec(
           mode=mode,
           loss=total_loss,
