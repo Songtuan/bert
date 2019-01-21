@@ -129,6 +129,7 @@ class DataProcessor:
     def __init__(self):
         self.num_label = None
 
+
     def __read_tsv(self, input_file, quotechar=None):
         """Reads a tab separated value file."""
         with tf.gfile.Open(input_file, "r") as f:
@@ -478,11 +479,24 @@ def build_model_fn(bert_config, num_labels, init_checkpoint, learning_rate,
     return model_fn
 
 
-def k_folder_seperate(examples):
-    random.shuffle(examples)
-    train_set = examples[ : 4001]
-    dev_set = examples[4001 : ]
-    return train_set, dev_set
+def k_folder_seperate(examples, k, i):
+    size_per_folder = len(examples) // k
+    example_folders = []
+    start_inx = 0
+    for j in range(k):
+        end_inx = start_inx + size_per_folder
+        single_floder_example = examples[start_inx : end_inx]
+        example_folders.append(single_floder_example)
+        start_inx = end_inx
+
+    dev_examples = example_folders[i]
+    del(example_folders[i])
+    train_examples = []
+    for single_folder in example_folders:
+        train_examples.extend(single_folder)
+    random.shuffle(train_examples)
+    random.shuffle(dev_examples)
+    return train_examples, dev_examples
 
 def k_folder_cross_validation(k = 5):
     tf.gfile.MakeDirs(FLAGS.output_dir)
@@ -515,7 +529,7 @@ def k_folder_cross_validation(k = 5):
 
         processor = DataProcessor()
         examples = processor.create_examples(FLAGS.data_dir)
-        train_examples, eval_examples = k_folder_seperate(examples)
+        train_examples, eval_examples = k_folder_seperate(examples, k, i)
         if FLAGS.do_train:
             num_train_steps = int(
                 len(train_examples) / FLAGS.train_batch_size * FLAGS.num_train_epochs)
@@ -603,6 +617,8 @@ def k_folder_cross_validation(k = 5):
 
 
 
+
+
 if __name__ == "__main__":
     flags.mark_flag_as_required("data_dir")
     flags.mark_flag_as_required("task_name")
@@ -626,7 +642,99 @@ if __name__ == "__main__":
             "was only trained up to sequence length %d" %
             (FLAGS.max_seq_length, bert_config.max_position_embeddings))
 
-    k_folder_cross_validation()
+    if FLAGS.do_predict:
+
+        tokenizer = tokenization.FullTokenizer(
+            vocab_file=FLAGS.vocab_file, do_lower_case=FLAGS.do_lower_case)
+        tpu_cluster_resolver = None
+        if FLAGS.use_tpu and FLAGS.tpu_name:
+            tpu_cluster_resolver = tf.contrib.cluster_resolver.TPUClusterResolver(
+                FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
+
+        is_per_host = tf.contrib.tpu.InputPipelineConfig.PER_HOST_V2
+        run_config = tf.contrib.tpu.RunConfig(
+            cluster=tpu_cluster_resolver,
+            master=FLAGS.master,
+            model_dir=FLAGS.output_dir,
+            save_checkpoints_steps=FLAGS.save_checkpoints_steps,
+            tpu_config=tf.contrib.tpu.TPUConfig(
+                iterations_per_loop=FLAGS.iterations_per_loop,
+                num_shards=FLAGS.num_tpu_cores,
+                per_host_input_for_training=is_per_host))
+
+        num_train_steps = None
+        num_warmup_steps = None
+
+        processor = DataProcessor()
+
+        model_fn = build_model_fn(
+            bert_config=bert_config,
+            num_labels=10,
+            init_checkpoint=FLAGS.init_checkpoint,
+            learning_rate=FLAGS.learning_rate,
+            num_train_steps=num_train_steps,
+            num_warmup_steps=num_warmup_steps,
+            use_tpu=FLAGS.use_tpu,
+            use_one_hot_embeddings=FLAGS.use_tpu)
+
+        # If TPU is not available, this will fall back to normal Estimator on CPU
+        # or GPU.
+        estimator = tf.contrib.tpu.TPUEstimator(
+            use_tpu=FLAGS.use_tpu,
+            model_fn=model_fn,
+            config=run_config,
+            train_batch_size=FLAGS.train_batch_size,
+            eval_batch_size=FLAGS.eval_batch_size,
+            predict_batch_size=FLAGS.predict_batch_size)
+
+
+        file_path = os.path.join(FLAGS.data_dirs, 'test.tsv')
+        predict_examples = processor.create_examples(file_path)
+
+        num_actual_predict_examples = len(predict_examples)
+        if FLAGS.use_tpu:
+            # TPU requires a fixed batch size for all batches, therefore the number
+            # of examples must be a multiple of the batch size, or else examples
+            # will get dropped. So we pad with fake examples which are ignored
+            # later on.
+            while len(predict_examples) % FLAGS.predict_batch_size != 0:
+                predict_examples.append(PaddingInputExample())
+
+        predict_file = os.path.join(FLAGS.output_dir, "test.tf_record")
+        create_features_record_file(predict_examples, FLAGS.max_seq_length, tokenizer, predict_file)
+
+        tf.logging.info("***** Running prediction*****")
+        tf.logging.info("  Num examples = %d (%d actual, %d padding)",
+                        len(predict_examples), num_actual_predict_examples,
+                        len(predict_examples) - num_actual_predict_examples)
+        tf.logging.info("  Batch size = %d", FLAGS.predict_batch_size)
+
+        predict_drop_remainder = True if FLAGS.use_tpu else False
+        predict_input_fn = create_input_fn(
+            input_file=predict_file,
+            seq_length=FLAGS.max_seq_length,
+            is_training=False,
+            drop_remainder=predict_drop_remainder)
+
+        result = estimator.predict(input_fn=predict_input_fn)
+
+        output_predict_file = os.path.join(FLAGS.output_dir, "test_results.tsv")
+        with tf.gfile.GFile(output_predict_file, "w") as writer:
+            num_written_lines = 0
+            tf.logging.info("***** Predict results *****")
+            for (i, prediction) in enumerate(result):
+                probabilities = prediction["probabilities"]
+                if i >= num_actual_predict_examples:
+                    break
+                output_line = "\t".join(
+                    str(class_probability)
+                    for class_probability in probabilities) + "\n"
+                writer.write(output_line)
+                num_written_lines += 1
+        assert num_written_lines == num_actual_predict_examples
+
+    else:
+        k_folder_cross_validation()
 
 
 
