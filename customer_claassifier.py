@@ -293,7 +293,7 @@ def create_features_record_file(examples, max_seq_length, tokenizer, output_file
         features["input_ids"] = create_int_feature(feature.input_ids)
         features["input_mask"] = create_int_feature(feature.input_masks)
         features["segment_ids"] = create_int_feature(feature.segment_ids)
-        features["label"] = create_float_feature(feature.label)
+        features["label"] = create_int_feature(feature.label)
         features["is_real_example"] = create_int_feature(
             [int(feature.is_real_example)])
 
@@ -308,7 +308,7 @@ def create_input_fn(input_file, seq_length, is_training,
         "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
         "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
         "segment_ids": tf.FixedLenFeature([seq_length], tf.int64),
-        "label": tf.FixedLenFeature([10], tf.float32),
+        "label": tf.FixedLenFeature([10], tf.int64),
         "is_real_example": tf.FixedLenFeature([], tf.int64),
     }
 
@@ -361,12 +361,16 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
   hidden_size = output_layer.shape[-1].value
 
+  # output_weights = tf.get_variable(
+  #     "output_weights", [num_labels, hidden_size],
+  #     initializer=tf.truncated_normal_initializer(stddev=0.02))
+
   output_weights = tf.get_variable(
-      "output_weights", [num_labels, hidden_size],
+      "output_weights", [num_labels * 2, hidden_size],
       initializer=tf.truncated_normal_initializer(stddev=0.02))
 
   output_bias = tf.get_variable(
-      "output_bias", [num_labels], initializer=tf.zeros_initializer())
+      "output_bias", [num_labels * 2], initializer=tf.zeros_initializer())
 
   with tf.variable_scope("loss"):
     if is_training:
@@ -375,13 +379,19 @@ def create_model(bert_config, is_training, input_ids, input_mask, segment_ids,
 
     logits = tf.matmul(output_layer, output_weights, transpose_b=True)
     logits = tf.nn.bias_add(logits, output_bias)
+    logits = tf.reshape(logits, [-1, num_labels, 2])
 
-    probabilities = tf.nn.sigmoid(logits)
+    #probabilities = tf.nn.sigmoid(logits)
+    log_probs = tf.nn.softmax(logits, axis=2)
+    one_hot_labels = tf.one_hot(labels, axis=-1)
 
-    per_example_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits), axis=-1)
+    per_example_loss = tf.reduce_sum(-tf.reduce_sum(log_probs * one_hot_labels, axis=-1), axis=-1)
     loss = tf.reduce_mean(per_example_loss)
 
-    return (loss, per_example_loss, logits, probabilities)
+    # per_example_loss = tf.reduce_sum(tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits), axis=-1)
+    # loss = tf.reduce_mean(per_example_loss)
+
+    return (loss, per_example_loss, logits, log_probs)
 
 
 def build_model_fn(bert_config, num_labels, init_checkpoint, learning_rate,
@@ -448,8 +458,8 @@ def build_model_fn(bert_config, num_labels, init_checkpoint, learning_rate,
         elif mode == tf.estimator.ModeKeys.EVAL:
 
             def metric_fn(per_example_loss, label, probabilities, is_real_example):
-                # predictions = tf.argmax(probabilities, axis=-1, output_type=tf.int32)
-                predictions = tf.round(probabilities)
+                predictions = tf.argmax(probabilities, axis=-1, output_type=tf.int32)
+                # predictions = tf.round(probabilities)
                 difference = label - predictions
                 num_none_zero = tf.count_nonzero(difference, axis=-1)
                 ground_truth = tf.zeros(tf.shape(num_none_zero))
